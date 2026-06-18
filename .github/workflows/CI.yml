@@ -47,7 +47,7 @@ jobs:
 
       # TODO: Just register these packages
       - name: Remove unregistered dependencies ( Parallel Gradient and QuantumNaturalGradient )
-        run: julia --project=. - e 'using Pkg;  Pkg.rm("ParallelGradient.jl"); Pkg.rm("QuantumNaturalGradient.jl")'
+        run: julia --project=. - e 'using Pkg;  Pkg.rm("ParallelGradient"); Pkg.rm("QuantumNaturalGradient")'
 
       - name: Install unregistered dependencies ( Parallel Gradient and QuantumNaturalGradient )
         run: julia --project=. -e 'using Pkg;  Pkg.add(url="https://github.com/NeTeNeSyQuMa/ParallelGradient.jl"); Pkg.add(url="https://github.com/NeTeNeSyQuMa/QuantumNaturalGradient.jl")'
