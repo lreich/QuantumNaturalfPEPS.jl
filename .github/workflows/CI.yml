@@ -45,8 +45,12 @@ jobs:
       - name: Cache Julia dependencies
         uses: julia-actions/cache@v2
 
+      # TODO: Just register these packages
+      - name: Remove unregistered dependencies ( Parallel Gradient and QuantumNaturalGradient )
+        run: julia --project=. - e 'using Pkg;  Pkg.rm("ParallelGradient.jl"); Pkg.rm("QuantumNaturalGradient.jl")'
+
       - name: Install unregistered dependencies ( Parallel Gradient and QuantumNaturalGradient )
-        run: julia --project=. -e 'using Pkg; Pkg.add(url="https://github.com/NeTeNeSyQuMa/ParallelGradient.jl"); Pkg.add(url="https://github.com/NeTeNeSyQuMa/QuantumNaturalGradient.jl")'
+        run: julia --project=. -e 'using Pkg;  Pkg.add(url="https://github.com/NeTeNeSyQuMa/ParallelGradient.jl"); Pkg.add(url="https://github.com/NeTeNeSyQuMa/QuantumNaturalGradient.jl")'
 
       - name: Instantiate project
         run: julia --project=. -e "using Pkg; Pkg.instantiate()"
