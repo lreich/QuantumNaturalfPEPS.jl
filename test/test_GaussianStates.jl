@@ -406,6 +406,7 @@ using QuantumNaturalfPEPS
             @test n_fail == 0
         end
 
+        #= NOTE: Whenever we encouter problematic points, we can add them here to cover these errors properly =#
         @testset "manual edge cases (empty / fully occupied Slater blocks)" begin
             L = 6
             # Δ = 0 gives a pure hopping model: no pairing, so all degenerate Q blocks are
