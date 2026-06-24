@@ -1068,6 +1068,25 @@ function bloch_messiah_decomposition(M::AbstractMatrix)
     # @assert D'*conj(V)*transpose(U)*conj(D) ≈ D'*conj(V)*transpose(C)*conj(C)*transpose(U)*conj(D)
     # @assert D'*conj(V)*transpose(Q)*conj(Q)*transpose(U)*conj(D) ≈ D'*conj(V)*transpose(Q)*R
 
+    # Canonicalize fully occupied Slater blocks (|v| = 1, hence u = 0). The RQ factorization
+    # above is driven by U, which vanishes on these columns, so it leaves their gauge
+    # undetermined and Vbar generically complex there. We identify the occupied columns (zero
+    # Ubar column) and bring their Vbar sub-block to a real form via an SVD, absorbing the left
+    # and right unitaries into D and C so that M = Dmat * UV_mat * Cmat stays invariant.
+    occ = findall(j -> norm(@view Ubar[:, j]) < 1e-9, axes(Ubar, 2))
+    if !isempty(occ)
+        row_support = findall(i -> norm(@view Vbar[i, occ]) > 1e-9, axes(Vbar, 1))
+        @assert length(row_support) == length(occ) "Occupied Slater block is not square; cannot canonicalize."
+        Vblk = Vbar[row_support, occ]
+        @assert isapprox(Vblk' * Vblk, I, atol=1e-8) "Occupied Slater block is not unitary."
+
+        Fo = svd(Vblk) # Vblk = Fo.U * Diagonal(Fo.S) * Fo.V'
+        D[:, row_support] = D[:, row_support] * conj(Fo.U) # rotate Vbar rows by Fo.U'
+        C[occ, :] = Fo.V' * C[occ, :]                      # rotate Vbar columns by Fo.V
+        Ubar = D' * U * C'
+        Vbar = transpose(D) * V * C'
+    end
+
     # Fix phases on identity block of Vbar
     diagV = diag(Vbar)
     id_cols = findall(x -> isapprox(abs(x), 1.0; atol=1e-10), diagV)

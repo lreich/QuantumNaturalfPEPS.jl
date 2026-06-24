@@ -406,6 +406,7 @@ using QuantumNaturalfPEPS
             @test n_fail == 0
         end
 
+        #= NOTE: Whenever we encouter problematic points, we can add them here to cover these errors properly =#
         @testset "manual edge cases (empty / fully occupied Slater blocks)" begin
             L = 6
             # Δ = 0 gives a pure hopping model: no pairing, so all degenerate Q blocks are
@@ -414,6 +415,21 @@ using QuantumNaturalfPEPS
 
             # Uniform chain at half filling with a zero mode (t = Δ = 1, μ = 0).
             @test check_bloch_messiah(build_H_BdG_1D(combined_η_1D(0.0, 1.0, 1.0, L), L))
+
+            # 2D square lattice (t =- 1, μ = 0, Δ = 0).
+            Lx, Ly = 4, 4
+            N = Lx * Ly
+            n_max_MF_params = QuantumNaturalfPEPS.get_max_num_MF_params_NN(Lx, Ly)
+            η = zeros(Float64, n_max_MF_params)
+            nx = QuantumNaturalfPEPS.get_max_num_hopping_x_NN(Lx, Ly)
+            ny = QuantumNaturalfPEPS.get_max_num_hopping_y_NN(Lx, Ly)
+            # hopping
+            hx_range = N+1 : N+nx
+            hy_range = N+nx+1 : N+nx+ny
+            t_mf = 1.0 # small mean-field hopping
+            η[hx_range] .= -t_mf
+            η[hy_range] .= -t_mf
+            @test check_bloch_messiah(QuantumNaturalfPEPS.build_general_H_BdG_2D_NN(η, Lx, Ly))
         end
     end
 end;
