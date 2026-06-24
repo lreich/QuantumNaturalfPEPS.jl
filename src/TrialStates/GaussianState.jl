@@ -811,6 +811,15 @@ Majoranas are then paired into complex fermions `c† = (γ₁ + i γ₂)/√2`,
 `C`-images, satisfy the CAR exactly.
 """
 function _zero_mode_fermions(Z::AbstractMatrix, _ph_conj, n_pairs::Int; tol=1e-7)
+    # Re-orthonormalize the zero-mode eigenvectors. For a degenerate eigenvalue cluster (all the
+    # zero modes share E = 0), LAPACK's MRRR driver (syevr, used by `eigen` for real-symmetric
+    # matrices) can return eigenvectors that span the correct subspace but are not mutually
+    # orthonormal — by as much as ~1e-4 on some BLAS builds (e.g. OpenBLAS on Linux), while being
+    # orthonormal to machine precision on others (Windows). Everything below assumes Z'Z = I (the
+    # null space is exactly particle-hole invariant, so A is unitary only for orthonormal Z). A QR
+    # orthonormalization preserves the span (Z stays in the null space) and makes the construction
+    # platform independent. Without it the PH-unitarity assertion below fails only on Linux.
+    Z = Matrix(qr(Z).Q)
     # Particle-hole operator restricted to the zero-mode subspace (in the Z basis): a vector
     # ω with coordinates w is Majorana (C-real) iff A * conj(w) = w. A is symmetric unitary,
     # so T(w) = A * conj(w) is an antiunitary involution (T² = I).
