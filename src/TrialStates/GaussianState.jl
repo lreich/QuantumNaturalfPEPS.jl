@@ -575,14 +575,22 @@ function build_slater_loggradient_cache(
     # hardcoded absolute number: it sits well above the eigensolver's resolution of a degenerate `μ`
     # cluster and well below any physical gap.
     # =========================================================================
+
     Fh = eigen(Hermitian(im .* Matrix(H_maj)))
     μ = Fh.values; Uh = Fh.vectors
     deg_tol = 1e-7 * max(maximum(abs, μ), one(eltype(μ)))
     invden = ComplexF64[abs(μ[a] - μ[b]) > deg_tol ? 1 / (im * (μ[a] - μ[b])) : 0
                         for a in 1:dim, b in 1:dim]
+
+    # I_dim = Matrix{ComplexF64}(I, dim, dim)
+    # # Optional regularization near gap closings: H dΓ - dΓ (H + reg) + C = 0 to make it more robust
+    # reg = 1e-10
+    # B = -H_maj + reg .* I_dim
+       
     for a in eachindex(dHs)
         dH_maj = transform_H_to_majorana_qq(Matrix(dHs[a]))
         C = dH_maj * Γ - Γ * dH_maj                    # [dH, Γ]
+        # dΓ = LinearAlgebra.sylvester(H_maj, B, C)
         dΓ = Uh * ((Uh' * C * Uh) .* invden) * Uh'     # min-norm solution of [H_maj, dΓ] = -C
         dΓ = 0.5 .* (dΓ .- transpose(dΓ))              # enforce exact skew-symmetry: Γᵀ = -Γ
         dΓ[abs.(dΓ) .< 1e-14] .= 0.0
@@ -734,30 +742,6 @@ function get_bogoliubov_blocks(M::AbstractMatrix)
 end
 
 """
-    zero_mode_threshold(E; rel_floor=1e-11, rel_ceiling=1e-4)
-
-Choose, from the spectrum `E` of a BdG Hamiltonian, the energy below which a mode is treated as a zero
-mode. A fixed absolute tolerance is not generic and we use the meaningful scale: `‖H‖ ≈ maximum(|E|)`
-
-Idea: consider modes with `|E| ≤ rel_ceiling·‖H‖` as zero-mode candidates and put the cut at the
-geometric mean of the top of that cluster and the bottom of the bulk — i.e. inside the gap, as far as
-possible from both sides. If there are no candidates the system is gapped and only genuine machine-zeros
-(`|E| ≤ rel_floor·‖H‖`) count. This makes the classification scale-invariant; the residual ambiguity (a
-genuinely small isolated mode with no gap) is unavoidable and is caught loudly by the even-count assertion
-in `bogoliubov` rather than silently corrupting the state. `rel_ceiling` is deliberately generous: a true
-small physical mode comes in a `±E` pair, so it is classified consistently either way.
-"""
-function zero_mode_threshold(E::AbstractVector; rel_floor=1e-11, rel_ceiling=1e-4)
-    scale = maximum(abs, E)
-    scale == 0 && return float(one(scale))          # H ≡ 0: handled by the caller's even-count check
-    a = sort(abs.(E))
-    k = count(<(rel_ceiling * scale), a)            # number of near-zero candidates
-    k == 0 && return rel_floor * scale              # gapped: only machine-zeros are zero modes
-    upper = k < length(a) ? a[k+1] : scale          # bottom of the bulk spectrum
-    return sqrt(a[k] * upper)                       # cut in the middle of the gap (log scale)
-end
-
-"""
     bogoliubov(H::Hermitian)
 
 Return the spectrum and canonical transform that diagonalize the fermionic quadratic Hamiltonian `H`.
@@ -779,12 +763,6 @@ Degenerate spectra are handled robustly by splitting the modes into two groups:
 This guarantees the canonical (anti)commutation relations by construction, so the resulting `M` is always a
 valid Bogoliubov transformation and is well-conditioned for the subsequent Bloch-Messiah decomposition.
 """
-# `zero_tol` is the energy window below which a mode counts as a zero mode. Passing `:auto` (default)
-# determines it from the spectrum itself via `zero_mode_threshold` (see there): a fixed absolute tolerance
-# cannot be generic across problems, because the eigensolver only resolves a (near-)degenerate zero cluster
-# to ~1e-9·‖H‖, while genuine modes can in principle be small too. The adaptive rule places the cut inside
-# the spectral gap that separates the near-zero cluster from the bulk, and an odd count inside the window
-# trips the assertion below rather than silently corrupting the state.
 function bogoliubov(H::Hermitian; tol=1e-8)
     N = div(size(H, 1), 2)
 
@@ -816,7 +794,7 @@ function bogoliubov(H::Hermitian; tol=1e-8)
     # Exact zero modes: the E = 0 eigenspace is mapped onto itself by C and makes [X  C(X)] rank
     # deficient, so we rebuild a particle-hole symmetric (Majorana) basis and pair them into fermions.
     if n_zero_pairs > 0
-        X = hcat(X, _zero_mode_fermions(M0[:, zero_idx], _ph_conj, n_zero_pairs; tol=tol))
+        X = hcat(X, _zero_mode_fermions(M0[:, zero_idx], _ph_conj, n_zero_pairs; tol=zero_tol))
     end
 
     M = hcat(X, _ph_conj(X))
@@ -832,6 +810,35 @@ function bogoliubov(H::Hermitian; tol=1e-8)
     @assert isapprox(transpose(U) * V + transpose(V) * U, zeros(N, N), atol=tol) "Bogoliubov blocks violate UᵀV + VᵀU = 0."
 
     return E, M
+end
+
+"""
+    zero_mode_threshold(E; rel_floor=1e-11, rel_ceiling=1e-4)
+
+Choose, from the spectrum `E` of a BdG Hamiltonian, the energy below which a mode is treated as a zero
+mode. A fixed absolute tolerance is not generic and we use the meaningful scale: `‖H‖ ≈ maximum(|E|)`
+
+# Keyword Arguments
+- `E`: The spectrum of the BdG Hamiltonian.
+- `rel_floor`: The relative tolerance below which a mode is considered a machine-zero.
+- `rel_ceiling`: The relative tolerance above which a mode is considered part of the bulk spectrum.
+
+# Example
+```julia
+E = [-1.0, -0.01, -0.00002, 0.00002, 0.01, 1.0]
+```
+Here, `maximum(|E|)=1.0`, so `rel_floor·‖H‖=1e-11` and `rel_ceiling·‖H‖=1e-4`.
+This means that the mode at `±0.00002` is treated as a zero mode, while the modes at `±0.01` and `±1.0` are part of the bulk spectrum.
+
+"""
+function zero_mode_threshold(E::AbstractVector; rel_floor=1e-11, rel_ceiling=1e-4)
+    scale = maximum(abs, E)
+    scale == 0 && return float(one(scale))          # H ≡ 0: handled by the caller's even-count check
+    a = sort(abs.(E))
+    k = count(<(rel_ceiling * scale), a)            # number of near-zero candidates
+    k == 0 && return rel_floor * scale              # gapped: only machine-zeros are zero modes
+    bottom = k < length(a) ? a[k+1] : scale         # bottom of the bulk spectrum
+    return sqrt(a[k] * bottom)                      # cut in the middle of the gap (log scale)
 end
 
 """

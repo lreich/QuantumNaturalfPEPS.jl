@@ -34,8 +34,9 @@ Random.seed!(1234)
         # set up Hilbert space and PEPS parameters
         bond_dim = 1 # ground state is a CDW and should be completely described by the Gaussian state, so a trivial PEPS is sufficient
         hilbert = ITensors.siteinds("Fermion", Lx, Ly)
-        peps = PEPS(hilbert; bond_dim=bond_dim, tensor_init=constant_peps_tensor)
-        # QuantumNaturalfPEPS.multiply_algebraic_spectrum!(peps, 3.) # Multiply the spectrum of the PEPS by a power-law factor as described in arXiv/2503.12557
+        # peps = PEPS(hilbert; bond_dim=bond_dim, tensor_init=constant_peps_tensor)
+        peps = PEPS(hilbert; bond_dim=bond_dim)
+        QuantumNaturalfPEPS.multiply_algebraic_spectrum!(peps, 3.) # Multiply the spectrum of the PEPS by a power-law factor as described in arXiv/2503.12557
 
         # set up mean-field parameters
         n_max_MF_params = QuantumNaturalfPEPS.get_max_num_MF_params_NN(Lx, Ly)
@@ -119,6 +120,8 @@ Random.seed!(1234)
         bond_dim = 1 # free fermions should be completely described by the Gaussian state, so a trivial PEPS is sufficient
         hilbert = ITensors.siteinds("Fermion", Lx, Ly)
         peps = PEPS(hilbert; bond_dim=bond_dim, tensor_init=constant_peps_tensor)
+
+        # peps = PEPS(hilbert; bond_dim=bond_dim)
         # QuantumNaturalfPEPS.multiply_algebraic_spectrum!(peps, 3.) # Multiply the spectrum of the PEPS by a power-law factor as described in arXiv/2503.12557
 
         # set up mean-field parameters
@@ -136,7 +139,7 @@ Random.seed!(1234)
         px_range = N+nx+ny+1 : N+nx+ny+nx
         py_range = N+nx+ny+nx+1 : N+nx+ny+nx+ny
 
-        t_mf = -2.0 # small mean-field hopping
+        t_mf = -1.0 # small mean-field hopping
         η[hx_range] .= t_mf
         η[hy_range] .= t_mf
 
@@ -157,6 +160,8 @@ Random.seed!(1234)
         sample_nr=Nsamples,
         maxiter=maxiters
         )
+
+        trained_θ[length(θ_PEPS)+1:N]
 
         # Free fermion (U=0) 4×4 OBC: ε_{m,n} = -2t[cos(mπ/5)+cos(nπ/5)]; 6 negative levels -(1+√5), -√5(×2), -(√5-1), -1(×2).
         # At half-filling (N=8), filling 6 negative + 2 zero-energy levels: E = -(1+√5) - 2√5 - (√5-1) - 2·1 = -2 - 4√5.
