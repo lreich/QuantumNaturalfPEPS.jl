@@ -102,10 +102,11 @@ function get_Ok(trial_state::GaussianState, S::Matrix{Int64}, Ok)
     slater_loggrad_cache = trial_state.slater_loggrad_cache
     Γ = trial_state.Γ
 
-    is_pure = Γ * Γ ≈ -I/4
+    is_pure = trial_state.is_pure # cached constant of the state (Γ² = -I/4), avoids a per-sample matmul
 
-    # Build matrix M_j to occupation projector to configuration S_j
-    M_j = build_occ_projector_matrix(to_occ_dict(occ_string), N)
+    # Build matrix M_j for the occupation projector to configuration S_j (all N sites measured)
+    M_j = zeros(Float64, 2N, 2N)
+    build_occ_projector_matrix!(M_j, occ_string, N)
 
     F_j = begin
         tmp = similar(Γ)

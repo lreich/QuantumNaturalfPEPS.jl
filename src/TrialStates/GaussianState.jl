@@ -86,15 +86,20 @@ mutable struct GaussianState <: AbstractTrialState
     occ_ref::Vector{Int} # quasiparticle occupation reference. Important for selecting the correct Bogoliubov vacuum in Bloch-Messiah decomposition.
     slater_loggrad_cache::SlaterLogGradientCache # Cache for efficient gradient calculations in Slater determinant states
     amplitude_cache::GaussianAmplitudeCache # Cache for efficient amplitude calculations
+    is_pure::Bool # whether Γ describes a pure Gaussian state (Γ² = -I/4); a constant of the state cached for get_Ok
 
     function GaussianState(H_BdG_func::Function, N::Int; η=Float64[], parity_sector::Int=0, target_state::Int=0)
         @assert parity_sector == 0 || parity_sector == 1 "Parity must be either 0 (even) or 1 (odd)"
-        Γ, occ_ref = get_Γ_from_H_BdG(H_BdG_func(η, N), parity_sector; target_state=target_state)
-        slater_loggrad_cache = build_slater_loggradient_cache(H_BdG_func, η, N; parity_sector=parity_sector, target_state=target_state)
-        amplitude_cache = build_amplitude_cache(H_BdG_func(η, N), parity_sector, occ_ref)
-        new(Γ, H_BdG_func, η, N, parity_sector, target_state, occ_ref, slater_loggrad_cache, amplitude_cache)
+        H_BdG = H_BdG_func(η, N)   # evaluate the Hamiltonian once and share it across the caches
+        Γ, occ_ref = get_Γ_from_H_BdG(H_BdG, parity_sector; target_state=target_state)
+        slater_loggrad_cache = build_slater_loggradient_cache(H_BdG_func, η, N; parity_sector=parity_sector, target_state=target_state, Γ=Γ)
+        amplitude_cache = build_amplitude_cache(H_BdG, parity_sector, occ_ref)
+        new(Γ, H_BdG_func, η, N, parity_sector, target_state, occ_ref, slater_loggrad_cache, amplitude_cache, is_pure_cov(Γ))
     end
 end
+
+# A pure fermionic Gaussian state has an orthogonal covariance matrix: Γ² = -I/4 (in our Γ² = -I/4 convention).
+is_pure_cov(Γ::AbstractMatrix) = Γ * Γ ≈ -I / 4
 getParity(GS::GaussianState) = Int(sign(real(pfaffian(2 * GS.Γ)))) == 1 ? 0 : 1
 getParity(Γ::AbstractMatrix) = Int(sign(real(pfaffian(2 * Γ)))) == 1 ? 0 : 1
 
@@ -111,9 +116,11 @@ Updates the variational parameters `η` of the Gaussian state `GS` and recompute
 """
 function write!(GS::GaussianState, η::AbstractVector{<:Number})
     GS.η = η
-    GS.Γ, GS.occ_ref = get_Γ_from_H_BdG(GS.H_BdG_func(η, GS.N), GS.parity_sector; target_state=GS.target_state)
-    GS.slater_loggrad_cache = build_slater_loggradient_cache(GS.H_BdG_func, η, GS.N; parity_sector=GS.parity_sector, target_state=GS.target_state)
-    GS.amplitude_cache = build_amplitude_cache(GS.H_BdG_func(η, GS.N), GS.parity_sector, GS.occ_ref)
+    H_BdG = GS.H_BdG_func(η, GS.N)   # evaluate the Hamiltonian once and share it across the caches
+    GS.Γ, GS.occ_ref = get_Γ_from_H_BdG(H_BdG, GS.parity_sector; target_state=GS.target_state)
+    GS.slater_loggrad_cache = build_slater_loggradient_cache(GS.H_BdG_func, η, GS.N; parity_sector=GS.parity_sector, target_state=GS.target_state, Γ=GS.Γ)
+    GS.amplitude_cache = build_amplitude_cache(H_BdG, GS.parity_sector, GS.occ_ref)
+    GS.is_pure = is_pure_cov(GS.Γ)
 end
 
 ###########################################################################################################
@@ -200,17 +207,22 @@ Returns a vector of matrices corresponding to the derivatives with respect to ea
 function build_H_BdG_derivatives(H_BdG_func::Function, η::AbstractVector{<:Number}, N::Int)
     dimH = 2 * N
     n_entries = dimH * dimH
-    
-    T = eltype(H_BdG_func(η, N))
+
+    H0 = Matrix(H_BdG_func(η, N))
+    T = eltype(H0)
 
     dHs = Vector{Matrix{T}}(undef, length(η))
     if T <: AbstractFloat
-        f = θ -> vec(Matrix(H_BdG_func(θ, N)))
-        J = Zygote.jacobian(f, η)[1]  # (2*dimH^2) x length(η)
-
+        # The BdG builders are affine in the (real) parameters η, so each derivative ∂H/∂η_a is the
+        # constant matrix A_a = H(η + e_a) - H(η). Extracting it directly with length(η)+1 evaluations
+        # is exact (no truncation error for an affine map) and avoids the heavy Zygote pullback that
+        # used to dominate the gradient-cache construction.
+        ηtmp = collect(float.(η))
         for a in eachindex(η)
-            dH_real = reshape(@view(J[1:n_entries, a]), dimH, dimH)
-            dHs[a] = dH_real
+            old = ηtmp[a]
+            ηtmp[a] = old + 1
+            dHs[a] = Matrix(H_BdG_func(ηtmp, N)) .- H0
+            ηtmp[a] = old
         end
     elseif T <: Complex
         η_reim = vcat(real.(η), imag.(η))
@@ -319,19 +331,55 @@ end
 
 """
     Returns: (0.5^N_measured) * sqrt(abs(det(Γ * 2 * M - I)))
+
+The occupation projector `M` is block-diagonal with one nonzero 2×2 block per measured site, so
+`2ΓM - I` is a rank-`2·N_measured` update of `-I`. 
+By the matrix-determinant identity the full `2N×2N` determinant collapses onto the measured Majorana indices `J`:
+
+    det(2ΓM - I) = det(I_{2k} - 2 Γ[J,J] M[J,J]),   k = N_measured.
+
+We therefore only form and factor the `2k×2k` block, which avoids the full `2N×2N` matmul and shrinks
+the determinant cost from `O((2N)³)` to `O((2k)³)` — a large saving in the site-by-site sampler where
+`k` runs from `1` to `N`.
 """
 function _get_prob_from_projector_matrix!(GS::GaussianState, M::AbstractMatrix, N_measured::Int)
-    A = similar(GS.Γ)
+    N_measured == 0 && return 1.0
 
-    # This computes A = Γ * 2 * M - I efficiently
-    mul!(A, GS.Γ, M)
-    @inbounds for idx in eachindex(A)
-        A[idx] *= 2
+    Γ = GS.Γ
+    N = size(Γ, 1) ÷ 2
+    k = N_measured
+
+    # Collect the measured Majorana indices J (the sites carrying a nonzero 2×2 block) and the block
+    # signs s_j = M[2s-1, 2s] = 1 - 2 n_j. The measured set may be any subset (dict / scattered) or the
+    # contiguous prefix used during sequential sampling — both are read straight from M's structure.
+    J = Vector{Int}(undef, 2k)
+    A = Matrix{eltype(Γ)}(undef, 2k, 2k)   # the 2k×2k block I_{2k} - 2 Γ[J,J] M[J,J] (fully written below)
+    a = 0
+    @inbounds for s in 1:N
+        sj = M[2s - 1, 2s]
+        if sj != 0
+            a += 1
+            J[2a - 1] = 2s - 1
+            J[2a]     = 2s
+        end
     end
-    @inbounds for i in axes(A, 1)
-        A[i, i] -= 1
+
+    ΓJ = @view Γ[J, J]
+    # A = I_{2k} - 2 Γ[J,J] M[J,J]. With M[J,J] block-diag([0 s; -s 0]) per site, the j-th block scales
+    # columns of Γ[J,J]:  (Γ[J,J] M[J,J])[:, 2a-1] = -s_a Γ[J,J][:, 2a],  [:, 2a] = s_a Γ[J,J][:, 2a-1].
+    @inbounds for a in 1:k
+        sj = real(M[J[2a - 1], J[2a]])
+        c1 = 2a - 1; c2 = 2a
+        for r in 1:2k
+            A[r, c1] =  2 * sj * ΓJ[r, c2]
+            A[r, c2] = -2 * sj * ΓJ[r, c1]
+        end
     end
-    return (0.5^N_measured) * sqrt(abs(det(A)))
+    @inbounds for i in 1:2k
+        A[i, i] += 1
+    end
+
+    return (0.5^k) * sqrt(abs(det(lu!(A; check=false))))
 end
 
 """
@@ -546,17 +594,22 @@ where `Fⱼ = Mⱼ - Γ⁻¹` and `Mⱼ` is the matrix for the occupation projec
     - This is a Sylvester equation of the form `A X + X B + C = 0` with `A = H`, `B = -H`, `C = -[dH, Γ]` and `X = dΓ`, which can be solved efficiently with `LinearAlgebra.sylvester`.
 """
 function build_slater_loggradient_cache(
-    H_BdG_func::Function, 
-    η::AbstractVector{<:Number}, 
+    H_BdG_func::Function,
+    η::AbstractVector{<:Number},
     N::Int;
     parity_sector::Int=0,
-    target_state::Int=0
+    target_state::Int=0,
+    Γ=nothing
 )
     H = Matrix(H_BdG_func(η, N))
     # as Γ is in the Majorana basis (qq), we need to transform H to the same basis
     H_maj = transform_H_to_majorana_qq(H)
     dim = size(H_maj, 1)
-    Γ, _ = get_Γ_from_H_BdG(Hermitian(H), parity_sector; target_state=target_state)
+    # Reuse the covariance matrix from the caller (the GaussianState constructor already has it) to avoid
+    # a redundant Bogoliubov diagonalization; fall back to computing it when called standalone.
+    if Γ === nothing
+        Γ, _ = get_Γ_from_H_BdG(Hermitian(H), parity_sector; target_state=target_state)
+    end
 
     dHs = build_H_BdG_derivatives(H_BdG_func, η, N)
     dΓs = Vector{Matrix{ComplexF64}}(undef, length(dHs))
@@ -615,15 +668,46 @@ Given a Bogoliubov-de Gennes Hamiltonian matrix `H_BdG` and an occupation string
 - `occ_string::Vector{Int}`: A vector of occupation numbers (0 or 1) for each site, of length `N`.
 
 """
+# qp -> qq reordering permutation: interleaves the N particle and N hole indices site by site.
+function _qq_perm(N::Int)
+    p = Vector{Int}(undef, 2N)
+    @inbounds for k in 1:N
+        p[2k - 1] = k
+        p[2k]     = N + k
+    end
+    return p
+end
+
+# Dirac (qq) -> Majorana (qq) single-site change of basis Ω0, extended to all N sites.
+_majorana_Ω(N::Int) = kron(Matrix{ComplexF64}(I, N, N), ComplexF64[1 1; im -im] ./ sqrt(2))
+
+"""
+    _Γ_from_M(M, G_diag_dirac)
+
+Build the Majorana (qq-ordered) covariance matrix Γ from an already-computed Bogoliubov transformation
+`M` and the diagonal Dirac-basis correlation matrix `G_diag_dirac`. Factored out so the target state and
+the Bogoliubov vacuum (used only for its parity) reuse the *same* diagonalization instead of re-running
+`bogoliubov`.
+"""
+function _Γ_from_M(M::AbstractMatrix, G_diag_dirac::Diagonal)
+    N = size(M, 1) ÷ 2
+    perm = _qq_perm(N)
+    G_dirac = (M * G_diag_dirac * M')[perm, perm]   # back to original basis, then qq-ordered
+    Ω = _majorana_Ω(N)
+    G_majorana = Ω * G_dirac * Ω'
+    Γ = (-im .* (2 .* G_majorana - I)) ./ 2   # `- I` is a matrix subtraction with the UniformScaling identity
+    @assert Γ ≈ -transpose(Γ) "Γ is not skew-symmetric!"
+    return (Γ - transpose(Γ)) / 2 # we symmetrize to avoid numerical issues
+end
+
 function get_Γ_from_H_BdG(H_BdG::Hermitian, parity_sector::Int; target_state::Int=0)
     N = size(H_BdG, 1) ÷ 2
     @assert target_state >= 0 && target_state <= N "target_state must be between 0 (ground state) and N=$(N) (fully excited state)"
 
-    # Diagonalize the BdG Hamiltonian with the Bogoliubov transformation M
+    # Diagonalize the BdG Hamiltonian once; the vacuum (for its parity) and the target state share M.
     _, M = bogoliubov(H_BdG)
 
-    # Construct the Correlation matrix in the Dirac basis (diagonal, quasiparticles) (qp-ordered)
-    parity_vac = getParity(get_Γ0_from_H_BdG(H_BdG))
+    parity_vac = getParity(_Γ_from_M(M, build_G_diag_dirac(zeros(Int, N))))
     nfill = ((parity_sector + parity_vac) % 2) + 2 * target_state # fill correct number of modes depending on the parity_sector and the parity of the ground state for the current M
     @assert nfill <= N "The parity sector and target state are incompatible for the given system size N=$(N). Please choose a different target_state or parity_sector."
     hole_occ = ones(Int, N)
@@ -631,90 +715,24 @@ function get_Γ_from_H_BdG(H_BdG::Hermitian, parity_sector::Int; target_state::I
         @views hole_occ[(N - nfill + 1):N] .= 0
     end
     particle_occ = 1 .- hole_occ
-    G_diag_dirac = Diagonal(vcat(particle_occ, hole_occ))
 
-    # Transform G to the original basis using the Bogoliubov transformation M (qp-ordered)
-    G_dirac = M * G_diag_dirac * M' 
-
-    # bring to qq-ordering
-    perm = begin
-        p = zeros(Int, 2N)
-        p[1:2:2N] = 1:N
-        p[2:2:2N] = N+1:2N
-        p
-    end
-    G_dirac = G_dirac[perm, perm]
-
-    # Transform G from the Dirac basis to the Majorana basis (qq-ordered) using the transformation matrix Ω
-    Ω0 = [1 1; im -im] ./ sqrt(2)
-    Ω = kron(I(N), Ω0) # Extend to all sites 
-
-    G_majorana = Ω * G_dirac * Ω'
-
-    # the covariance matrix is then obtained by 
-    Γ_majorana = ( -im .* (2G_majorana - I)) ./ 2
-
-    @assert Γ_majorana ≈ -transpose(Γ_majorana) "Γ is not skew-symmetric!"
-
-    return (Γ_majorana - transpose(Γ_majorana)) / 2, particle_occ # we symmetrize to avoid numerical issues
+    Γ = _Γ_from_M(M, Diagonal(vcat(particle_occ, hole_occ)))
+    return Γ, particle_occ
 end
 
 function transform_H_to_majorana_qq(H_BdG::AbstractMatrix)
     N = size(H_BdG, 1) ÷ 2
-
-    # bring to qq-ordering
-    perm = begin
-        p = zeros(Int, 2N)
-        p[1:2:2N] = 1:N
-        p[2:2:2N] = N+1:2N
-        p
-    end
+    perm = _qq_perm(N)
     H_qq = H_BdG[perm, perm]
-
-    # Transform H from the Dirac basis to the Majorana basis (qq-ordered) using the transformation matrix Ω
-    Ω0 = [1 1; im -im] ./ sqrt(2)
-    Ω = kron(I(N), Ω0) # Extend to all sites 
-
+    Ω = _majorana_Ω(N)
     H_majorana = Ω * H_qq * Ω'
-
-    # Majorana generator
-    h = 2 .* imag(H_majorana)
-
-    return real.(h)
+    return real.(2 .* imag(H_majorana)) # Majorana generator
 end
 
 function get_Γ0_from_H_BdG(H_BdG::Hermitian)
-    N = size(H_BdG, 1) ÷ 2
-
-    # Diagonalize the BdG Hamiltonian with the Bogoliubov transformation M
     _, M = bogoliubov(H_BdG)
-
-    G_diag_dirac = build_G_diag_dirac(zeros(Int, N)) # vacuum state
-
-    # Transform G to the original basis using the Bogoliubov transformation M (qp-ordered)
-    G_dirac = M * G_diag_dirac * M' 
-
-    # bring to qq-ordering
-    perm = begin
-        p = zeros(Int, 2N)
-        p[1:2:2N] = 1:N
-        p[2:2:2N] = N+1:2N
-        p
-    end
-    G_dirac = G_dirac[perm, perm]
-
-    # Transform G from the Dirac basis to the Majorana basis (qq-ordered) using the transformation matrix Ω
-    Ω0 = [1 1; im -im] ./ sqrt(2)
-    Ω = kron(I(N), Ω0) # Extend to all sites 
-
-    G_majorana = Ω * G_dirac * Ω'
-
-    # the covariance matrix is then obtained by 
-    Γ_majorana = ( -im .* (2G_majorana - I)) ./ 2
-
-    @assert Γ_majorana ≈ -transpose(Γ_majorana) "Γ is not skew-symmetric!"
-
-    return (Γ_majorana - transpose(Γ_majorana)) / 2 # we symmetrize to avoid numerical issues
+    N = size(H_BdG, 1) ÷ 2
+    return _Γ_from_M(M, build_G_diag_dirac(zeros(Int, N))) # vacuum state
 end
 
 """
