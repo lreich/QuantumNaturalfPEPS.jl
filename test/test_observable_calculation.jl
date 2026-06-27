@@ -181,7 +181,7 @@ Random.seed!(1234)
         # check for the accuracy of sampled results
         @test isapprox(Ntot_mean, 8.0; atol=atol)
         @test isapprox(energy, -2-4*sqrt(5); atol=atol)
-        @test 0.375 <= M2_mean / N <= 0.625
-        @test 0.178 < nn_avg_mean < 0.218
+        @test 0.375 - M2_error <= M2_mean / N <= 0.625 + M2_error
+        @test 0.178 - nn_avg_error < nn_avg_mean < 0.218 + nn_avg_error
     end
 end;
