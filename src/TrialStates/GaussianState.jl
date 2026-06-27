@@ -1097,6 +1097,8 @@ function bloch_messiah_decomposition(M::AbstractMatrix)
     @assert isapprox(Q*P, P*conj.(Q); atol=1e-10) "Q*P != P*conj.(Q)"
 
     E_Q, B = eigen(Q; sortby = (x -> -real(x)))
+    @assert norm(B' * B - I, Inf) < 1e-10
+    @assert norm(B * B' - I, Inf) < 1e-10 
     # Q_bar = real(B'*Q*B)
     P_bar = B'*P*conj.(B)
     @assert isapprox(P_bar, -transpose(P_bar); atol=1e-10) "P_bar should be skew-symmetric"
@@ -1112,31 +1114,47 @@ function bloch_messiah_decomposition(M::AbstractMatrix)
     # Ubar/Vbar and a broken reconstruction (CI passed on Windows but failed on Ubuntu). The eigenvalues
     # of Q ∈ [0, 1] are either degenerate to ≲1e-10 or separated by ≳1e-5, so 1e-8 sits safely in between.
     degeneracy_atol = 1e-8
-    S = zeros(ComplexF64, size(P_bar))
-    visited = falses(length(E_Q)) # Track which indices have been processed
-    for i in 1:length(E_Q)
-        if !visited[i]
-            idx = findall(x -> isapprox(x, E_Q[i]; atol=degeneracy_atol), E_Q)
-            visited[idx] .= true # Mark all indices in this block as visited
-            P_sub = P_bar[idx, idx] # Extract the sub-block corresponding to the eigenvalue
-            if norm(P_sub, Inf) < 1e-10
-                # P carries no useful pairing information in this degenerate block
-                # (empty or fully occupied Slater block). The gauge is then completely
-                # underdetermined, so we bypass the skew-canonical form routine and choose
-                # a stable, default gauge S_sub = I to avoid numerical instability.
-                S_sub = Matrix{ComplexF64}(I, length(idx), length(idx))
-            else
-                # P has structure, use it to fix the gauge.
-                S_sub, X_sub = skew_canonical_form(P_sub) # Canonical form for this block
-                S_sub, _ = absorb_phases(S_sub, X_sub)  # makes canonical blocks real
-                @assert (norm(S_sub' * S_sub - I(length(idx)), Inf) < 1e-10) "Gauge fixing failed in a degenerate block."
-            end
-            S[idx, idx] = S_sub # Place the canonical transformation in the correct block of S
+
+    # Partition the already-sorted Q spectrum into disjoint contiguous blocks.
+    # Using `findall(isapprox(...), E_Q)` can produce overlapping blocks because
+    # approximate equality is not transitive.
+    q_blocks = UnitRange{Int}[]
+    i = firstindex(E_Q)
+    while i <= lastindex(E_Q)
+        j = i
+        while j < lastindex(E_Q) && isapprox(E_Q[j + 1], E_Q[j]; atol=degeneracy_atol, rtol=0)
+            j += 1
         end
+        push!(q_blocks, i:j)
+        i = j + 1
     end
+
+    S = zeros(ComplexF64, size(P_bar))
+    for idx in q_blocks
+        P_sub = P_bar[idx, idx] # Extract the sub-block corresponding to the eigenvalue
+        if norm(P_sub, Inf) < 1e-10
+            # P carries no useful pairing information in this degenerate block
+            # (empty or fully occupied Slater block). The gauge is then completely
+            # underdetermined, so we bypass the skew-canonical form routine and choose
+            # a stable, default gauge S_sub = I to avoid numerical instability.
+            S_sub = Matrix{ComplexF64}(I, length(idx), length(idx))
+        else
+            # P has structure, use it to fix the gauge.
+            S_sub, X_sub = skew_canonical_form(P_sub) # Canonical form for this block
+            S_sub, _ = absorb_phases(S_sub, X_sub)  # makes canonical blocks real
+            @assert (norm(S_sub' * S_sub - I(length(idx)), Inf) < 1e-10) "Gauge fixing failed in a degenerate block."
+        end
+        S[idx, idx] = S_sub # Place the canonical transformation in the correct block of S
+    end
+    
+    @assert norm(S' * S - I, Inf) < 1e-10
+    @assert norm(S * S' - I, Inf) < 1e-10  
+
     P_canonical = S' * P_bar * conj.(S)
 
     A = permute_zero_cols_to_end(P_canonical)
+    @assert norm(A' * A - I, Inf) < 1e-10
+    @assert norm(A * A' - I, Inf) < 1e-10  
 
     D = B * S * A
     @assert D' * D ≈ I "D should be unitary"
