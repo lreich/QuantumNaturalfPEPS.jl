@@ -250,17 +250,38 @@ function get_logψ_flipped(peps::AbstractPEPS, Ek_terms, env_top::Vector{Environ
                           sample::Matrix{Int64}, logψ::Number;
                           trial_state::AbstractTrialState=IdentityState(dim(siteinds(peps)[1])),
                           h_envs_r=nothing, h_envs_l=nothing, fourb_envs_r=nothing, fourb_envs_l=nothing, logψ_flipped=nothing,
-                          timer=TimerOutput())
-    
+                          fixed_boundary::Bool=false, timer=TimerOutput())
+
     if logψ_flipped === nothing
         logψ_flipped = Dict{Any, Number}()
     end
-      
+
     # deals with the term with no flipped spin
     if haskey(Ek_terms, ())
         logψ_flipped[()] = logψ
     end
-    
+
+    # Fixed-boundary mode (issue #4): recompute every flipped amplitude ψ(S')
+    # from scratch with the fixed-boundary contraction routine, so that the same
+    # configuration always maps to the same ψ and the local energy is a strict
+    # variational quantity. This is more expensive than reusing the environments
+    # at the flip row (the default path below), which is cheaper but makes ψ(S)
+    # depend on where the flipped site sits.
+    if fixed_boundary
+        @timeit timer "fixed_boundary" for flip_term in keys(Ek_terms)
+            flip_term == () && continue
+            haskey(logψ_flipped, flip_term) && continue
+
+            sample_flipped = copy(sample)
+            for ((x, y), Sij) in flip_term
+                sample_flipped[x, y] = Sij
+            end
+            logψ_flipped[flip_term] = first(get_logψ_fixed_boundary(peps, sample_flipped))
+            logψ_flipped[flip_term] += log(get_amplitude(trial_state, collect(vec(sample_flipped))))
+        end
+        return logψ_flipped
+    end
+
     # sorts the dictionary into the different categories
     horizontal, vertical, fourBody, longerHor, other = sort_dict(Ek_terms, vertical=false)
 
@@ -343,18 +364,20 @@ function get_Ek(peps::AbstractPEPS, ham::OpSum, sample; kwargs...)
     return get_Ek(peps, ham_op, sample; kwargs...)
 end
 
-function get_Ek(peps::AbstractPEPS, ham_op::TensorOperatorSum, sample; env_top=Array{Environment}(undef, size(sample,1)-1), kwargs...)
-    # get the environment tensors
-    logψ, env_top, env_down = get_logψ_and_envs(peps, sample, env_top) # compute the environments of the peps according to that sample
-    return get_Ek(peps, ham_op, env_top, env_down, sample, logψ; kwargs...)
+function get_Ek(peps::AbstractPEPS, ham_op::TensorOperatorSum, sample; env_top=Array{Environment}(undef, size(sample,1)-1), fixed_boundary::Bool=false, kwargs...)
+    # get the environment tensors. When fixed_boundary is requested the reference
+    # logψ is also taken at the canonical split, so it is consistent with the
+    # flipped amplitudes computed below.
+    logψ, env_top, env_down = get_logψ_and_envs(peps, sample, env_top; fixed_boundary) # compute the environments of the peps according to that sample
+    return get_Ek(peps, ham_op, env_top, env_down, sample, logψ; fixed_boundary, kwargs...)
 end
 
 
-function get_Ek(peps::AbstractPEPS, ham_op::TensorOperatorSum, env_top::Vector{Environment}, env_down::Vector{Environment}, sample::Matrix{Int64}, logψ::Number; trial_state=IdentityState(dim(siteinds(peps)[1])), h_envs_r=nothing, h_envs_l=nothing, fourb_envs_r=nothing, fourb_envs_l=nothing, logψ_flipped=nothing, Ek_terms=nothing, kwargs...)
+function get_Ek(peps::AbstractPEPS, ham_op::TensorOperatorSum, env_top::Vector{Environment}, env_down::Vector{Environment}, sample::Matrix{Int64}, logψ::Number; trial_state=IdentityState(dim(siteinds(peps)[1])), h_envs_r=nothing, h_envs_l=nothing, fourb_envs_r=nothing, fourb_envs_l=nothing, logψ_flipped=nothing, Ek_terms=nothing, fixed_boundary::Bool=false, kwargs...)
     if Ek_terms === nothing
         Ek_terms = QuantumNaturalGradient.get_precomp_sOψ_elems(ham_op, sample; get_flip_sites=true)
     end
-    logψ_flipped = get_logψ_flipped(peps, Ek_terms, env_top, env_down, sample, logψ; trial_state, h_envs_r, h_envs_l, fourb_envs_r, fourb_envs_l, logψ_flipped, kwargs...)
+    logψ_flipped = get_logψ_flipped(peps, Ek_terms, env_top, env_down, sample, logψ; trial_state, h_envs_r, h_envs_l, fourb_envs_r, fourb_envs_l, logψ_flipped, fixed_boundary, kwargs...)
     
     Ek = 0
     for flip_term in keys(Ek_terms)
