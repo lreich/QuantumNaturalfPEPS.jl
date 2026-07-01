@@ -52,8 +52,7 @@ Calculates the Energy of a given a peps and hamiltonian
 """
 function Ek(peps, ham_op; timer=TimerOutput(),
             sampling_mode=:full,
-            slow_energy=false, slow_energy_pos=(size(peps, 1)-1) ÷ 2,
-            fixed_boundary=false)
+            slow_energy=false, slow_energy_pos=(size(peps, 1)-1) ÷ 2)
 
     S, logpc, env_top = @timeit timer "sampling" get_sample(peps; mode=sampling_mode, timer) # draw a sample
 
@@ -66,15 +65,12 @@ function Ek(peps, ham_op; timer=TimerOutput(),
         func = get_logψ_function(peps; pos=slow_energy_pos)
         E_loc = convert_if_real(QuantumNaturalGradient.get_Ek(S, ham_op, func))
     else
-        # When fixed_boundary is requested the reference logψ is taken at the
-        # canonical split so it is consistent with the flipped amplitudes that
-        # get_Ek recomputes with the fixed-boundary contraction routine (issue #4).
-        logψ, env_top, env_down, max_bond = @timeit timer "vertical_envs" get_logψ_and_envs(peps, S, env_top; overwrite, fixed_boundary) # compute the environments of the peps according to that sample
+        logψ, env_top, env_down, max_bond = @timeit timer "vertical_envs" get_logψ_and_envs(peps, S, env_top; overwrite) # compute the environments of the peps according to that sample
 
         # initialize the flipped logψ dictionary, will be used to compute other observables or for the resampling
-        logψ_flipped = Dict{Any, Number}()
+        logψ_flipped = Dict{Any, Number}() 
         Ek_terms = @timeit timer "precomp_sHψ_elems"  QuantumNaturalGradient.get_precomp_sOψ_elems(ham_op, S; get_flip_sites=true)
-        E_loc = @timeit timer "energy" get_Ek(peps, ham_op, env_top, env_down, S, logψ; logψ_flipped, Ek_terms, fixed_boundary, timer) # compute the local energy
+        E_loc = @timeit timer "energy" get_Ek(peps, ham_op, env_top, env_down, S, logψ; logψ_flipped, Ek_terms, timer) # compute the local energy
     end
     return E_loc, logψ, S, logpc, max_bond
 end

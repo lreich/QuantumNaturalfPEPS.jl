@@ -97,46 +97,11 @@ function generate_env_row(peps_projected, contract_dim; env_row_above=nothing, a
     return Environment(peps_projected, norm_shift; normalize=true)
 end
 
-# Canonical, configuration-independent split position for the boundary-MPS
-# environments (n_env = length(env_top) = Lx - 1). Splitting at the same place
-# for every configuration S is what lets the fixed-boundary contraction return a
-# single, consistent ψ(S).
-fixed_boundary_pos(n_env::Int) = max(1, n_env ÷ 2)
-
-function get_logψ(env_top::Vector{Environment}, env_down::Vector{Environment};
-                  pos=length(env_top)÷2, fixed_boundary::Bool=false)
-    # When fixed_boundary is requested we always contract at the canonical centre
-    # split, overriding any caller-chosen `pos`. This guarantees that the same
-    # configuration S always yields the same amplitude ψ(S) (see issue #4):
-    # reusing environments and splitting at the (cheaper) flip row instead makes
-    # ψ(S) depend on where a flipped site sits, which breaks the variational bound.
-    if fixed_boundary
-        pos = fixed_boundary_pos(length(env_top))
-    end
+function get_logψ(env_top::Vector{Environment}, env_down::Vector{Environment}; pos=length(env_top)÷2)
     #ψS = contract(env_top[pos].env.*env_down[end-pos+1].env)[1]
     #logψS = log(Complex(ψS))
     logψS = _log_or_not_dot(env_top[pos].env, env_down[end-pos+1].env, true; dag=false)
     return logψS + env_top[pos].f + env_down[end-pos+1].f
-end
-
-"""
-    get_logψ_fixed_boundary(peps, S; kwargs...)
-
-Fixed-boundary contraction routine for the log-amplitude `log(ψ(S))`.
-
-Builds the full top and bottom boundary-MPS environments for the configuration
-`S` and contracts them at a single, configuration-independent split position (the
-centre of the lattice, see [`fixed_boundary_pos`](@ref)). Because the split never
-depends on where a (possibly flipped) site sits, the returned amplitude is
-identical for a given `S`, restoring a consistent `ψ(S)` and hence a strict
-variational energy estimate (see issue #4). The price is that the environments are
-recomputed for `S` from scratch instead of being reused.
-
-Returns `(logψ, env_top, env_down)`.
-"""
-function get_logψ_fixed_boundary(peps::AbstractPEPS, S::Matrix{Int64}; kwargs...)
-    logψ, env_top, env_down, _ = get_logψ_and_envs(peps, S; fixed_boundary=true, kwargs...)
-    return logψ, env_top, env_down
 end
 
 function logψ_exact(peps, sample)
